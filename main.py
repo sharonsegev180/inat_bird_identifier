@@ -1,63 +1,60 @@
-# bird_identifier_api/main.py
-
 from flask import Flask, request, jsonify
 import requests
-import tempfile
 import os
+import tempfile
 
 app = Flask(__name__)
 
-INATURALIST_API_URL = "https://api.inaturalist.org/v1/identifications"
+IMGUR_CLIENT_ID = os.getenv("IMGUR_CLIENT_ID")
 
 @app.route("/")
 def home():
-    return "Bird Identifier API is running 🐦"
+    return "Bird Identifier API is running 🐦 - Upload an image via POST to /identify_bird"
 
 @app.route("/identify_bird", methods=["POST"])
 def identify_bird():
-    try:
-        data = request.get_json()
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded.'}), 400
 
-        if not data or "image_url" not in data:
-            return jsonify({"error": "Missing 'image_url' in request."}), 400
+    file = request.files['file']
 
-        image_url = data["image_url"]
+    # העלאה ל-Imgur לקבלת URL ציבורי
+    headers = {"Authorization": f"Client-ID {IMGUR_CLIENT_ID}"}
+    files = {"image": file.read()}
+    imgur_response = requests.post("https://api.imgur.com/3/image", headers=headers, files=files)
 
-        # הורדת התמונה לקובץ זמני
-        response = requests.get(image_url)
-        if response.status_code != 200:
-            return jsonify({"error": "Failed to download image from provided URL."}), 400
+    if imgur_response.status_code != 200:
+        return jsonify({"error": "Failed to upload image to Imgur."}), 500
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-            tmp.write(response.content)
-            tmp.flush()
+    image_url = imgur_response.json()['data']['link']
 
-            # שליחת הבקשה לזיהוי ל-Inaturalist
-            files = {"file": open(tmp.name, "rb")}
-            api_response = requests.post("https://api.inaturalist.org/v1/identifications/project", files=files)
+    # שליחת URL ל-iNaturalist לזיהוי
+    data = {
+        "image_url": image_url,
+        "lat": 32.0853,  # ת"א לדוגמה
+        "lng": 34.7818,
+        "locale": "he"
+    }
 
-            if api_response.ok:
-                result = api_response.json()
-                # בדיקה אם נמצאו תוצאות
-                if result.get('results'):
-                    top_result = result['results'][0]
-                    species_guess = top_result.get('taxon', {}).get('preferred_common_name', 'Unknown')
-                    scientific_name = top_result.get('taxon', {}).get('name', 'Unknown')
-                    confidence = top_result.get('score', 'N/A')
+    inat_response = requests.post("https://api.inaturalist.org/v1/computervision/identify", json=data)
 
-                    return jsonify({
-                        "species_guess": species_guess,
-                        "scientific_name": scientific_name,
-                        "confidence": confidence
-                    }), 200
-                else:
-                    return jsonify({"message": "No bird identified in the image."}), 200
-            else:
-                return jsonify({"error": "iNaturalist API returned an error."}), 500
+    if inat_response.status_code != 200:
+        return jsonify({"error": "Failed to identify image using iNaturalist."}), 500
 
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    results = inat_response.json().get("results")
+    if not results:
+        return jsonify({"message": "No bird identified in the image."}), 200
+
+    top_result = results[0]
+    taxon = top_result.get("taxon", {})
+
+    return jsonify({
+        "species_guess": taxon.get("preferred_common_name", "Unknown"),
+        "scientific_name": taxon.get("name", "Unknown"),
+        "confidence": round(top_result.get("score", 0), 2),
+        "image_url": image_url,
+        "inat_url": f"https://www.inaturalist.org/taxa/{taxon.get('id', '')}"
+    }), 200
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 3000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)))
