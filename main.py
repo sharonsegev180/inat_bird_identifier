@@ -1,56 +1,69 @@
+# Updated main.py for your bird identification GPT bot
+# Displays species name, scientific name, confidence, species ID, and uploaded image link
+
 from flask import Flask, request, jsonify
 import requests
 import os
 
 app = Flask(__name__)
 
-IMGUR_CLIENT_ID = os.getenv("IMGUR_CLIENT_ID")
-INATURALIST_URL = "https://api.inaturalist.org/v1/observations"
+IMGUR_CLIENT_ID = os.environ.get("IMGUR_CLIENT_ID")
+INATURALIST_API_URL = "https://api.inaturalist.org/v1/"
 
-def upload_to_imgur(image):
-    headers = {"Authorization": f"Client-ID {IMGUR_CLIENT_ID}"}
-    files = {"image": image}
-    response = requests.post("https://api.imgur.com/3/image", headers=headers, files=files)
-    if response.status_code == 200:
-        return response.json()['data']['link']
-    else:
-        return None
+@app.route("/")
+def home():
+    return "iNaturalist Bird Identifier API is running 🐦"
 
 @app.route("/identify", methods=["POST"])
-def identify_bird():
-    if "file" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
+def identify():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file uploaded."}), 400
 
-    file = request.files["file"]
-    imgur_link = upload_to_imgur(file)
-    if not imgur_link:
-        return jsonify({"error": "Failed to upload image to imgur"}), 500
+    file = request.files['file']
+    
+    # Upload to Imgur
+    headers = {'Authorization': f'Client-ID {IMGUR_CLIENT_ID}'}
+    img = {'image': file.read()}
+    imgur_response = requests.post("https://api.imgur.com/3/image", headers=headers, files=img)
+    if imgur_response.status_code != 200:
+        return jsonify({"error": "Failed to upload image to Imgur."}), 500
 
-    params = {
-        "image_url": imgur_link,
-        "per_page": 1,
-        "order_by": "score"
+    image_url = imgur_response.json()['data']['link']
+
+    # Identify with iNaturalist
+    data = {
+        'image_url': image_url,
+        'lat': 32.0853,  # Example: Tel Aviv latitude
+        'lng': 34.7818,  # Example: Tel Aviv longitude
+        'locale': 'he'
     }
-    response = requests.get(f"https://api.inaturalist.org/v1/computervision/score_image", params=params)
+    inat_response = requests.post(f"{INATURALIST_API_URL}computervision/identify", data=data)
 
-    if response.status_code == 200:
-        data = response.json()
-        if data["results"] and data["results"][0]["taxon"]:
-            taxon = data["results"][0]["taxon"]
-            result = {
-                "common_name": taxon.get("preferred_common_name", "Unknown"),
-                "scientific_name": taxon.get("name", "Unknown"),
-                "confidence": data["results"][0]["score"]
-            }
-            return jsonify(result)
-        else:
-            return jsonify({"message": "No bird identified in the image."}), 200
-    else:
-        return jsonify({"error": "Failed to get identification from iNaturalist"}), 500
+    if inat_response.status_code != 200:
+        return jsonify({"error": "Failed to identify image with iNaturalist."}), 500
 
-@app.route("/", methods=["GET"])
-def home():
-    return "Bird Identifier Action is running 🐦"
+    results = inat_response.json()['results']
+    if not results:
+        return jsonify({"message": "No species identified."}), 200
+
+    top_result = results[0]
+    species_guess = top_result.get('taxon', {}).get('preferred_common_name', 'Unknown')
+    scientific_name = top_result.get('taxon', {}).get('name', 'Unknown')
+    confidence = top_result.get('score', 0)
+    species_id = top_result.get('taxon', {}).get('id', 'Unknown')
+
+    # Structured, clean response
+    response = {
+        "species_name": species_guess,
+        "scientific_name": scientific_name,
+        "confidence": round(confidence, 2),
+        "species_id": species_id,
+        "image_url": image_url
+    }
+
+    print(f"[LOG] Identification: {response}")
+    return jsonify(response)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)))
+    app.run(host="0.0.0.0", port=3000)
+
